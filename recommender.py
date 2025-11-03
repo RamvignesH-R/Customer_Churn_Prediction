@@ -1,49 +1,114 @@
-import numpy as np
 import pandas as pd
+import numpy as np
 import ast
-import re
 
-def filterDataset(dataset,allergies:list):
+# --- A Robust Function to Safely Parse String Lists ---
+def _safe_literal_eval(val):
+    """
+    Safely evaluates a string that should be a Python list.
+    If the string is malformed, empty, NaN, or not a string, it returns an empty list.
+    This prevents the application from crashing on messy data.
+    """
+    if isinstance(val, str):
+        try:
+            # Attempt to parse the string into a Python object (e.g., a list)
+            return ast.literal_eval(val)
+        except (ValueError, SyntaxError):
+            # If parsing fails, it's a malformed string.
+            return []
+    elif isinstance(val, list):
+        # If it's already a list, it's safe to return.
+        return val
+    else:
+        # For any other types (like NaN, None), return an empty list as a safe default.
+        return []
 
-    if len(allergies)==0:
-        return dataset
+# --- From-Scratch Machine Learning Components (Vectorized for Speed) ---
+
+def manual_standard_scaler(df, input_vector):
+    """
+    Manually standardizes a DataFrame and an input vector using efficient, vectorized operations.
+    This function replaces scikit-learn's StandardScaler.
+    """
+    # Calculate mean and standard deviation for each column
+    means = df.mean(axis=0)
+    stds = df.std(axis=0)
     
-    allergyPattern='|'.join([re.escape(i.strip().lower()) for i in allergies])
-    mask=dataset['RecipeIngredientParts'].str.lower().str.contains(allergyPattern,na=False)
-    newdf=dataset[~mask]
+    # To prevent division by zero if a column has zero variance
+    stds[stds == 0] = 1
+    
+    # Apply the Z-score formula to the entire DataFrame at once
+    scaled_df = (df - means) / stds
+    
+    # Apply the Z-score formula to the user's input vector
+    scaled_vector = (np.array(input_vector) - means.values) / stds.values
+    
+    return scaled_df, scaled_vector
 
-    return newdf
+def manual_nearest_neighbors(scaled_df, scaled_vector):
+    """
+    Manually finds the single nearest neighbor using vectorized cosine similarity.
+    This function replaces scikit-learn's NearestNeighbors.
+    """
+    # Calculate the dot product of every recipe vector with the user's vector
+    dot_product = np.dot(scaled_df.values, scaled_vector)
+    
+    # Calculate the magnitude (L2 norm) of every recipe vector
+    dataset_norm = np.linalg.norm(scaled_df.values, axis=1)
+    
+    # Calculate the magnitude of the user's vector
+    vector_norm = np.linalg.norm(scaled_vector)
+    
+    # Calculate the cosine similarity for all recipes at once
+    # Adding a small epsilon (1e-9) to prevent division by zero
+    similarities = dot_product / (dataset_norm * vector_norm + 1e-9)
+    
+    # Find the index of the recipe with the highest similarity score
+    best_match_index = np.argmax(similarities)
+    
+    return best_match_index
 
-def contentBasedRecommend(dataset,nutritionInput,params):
+# --- Main Recommendation Function ---
 
+def content_based_recommend(dataset, nutrition_input):
+    """
+    Generates a single best recipe recommendation by orchestrating the from-scratch components.
+    """
     if dataset.empty:
         return pd.DataFrame()
+
+    # Define and select the nutritional columns by name for robustness
+    nutrition_columns = [
+        'Calories', 'FatContent', 'SaturatedFatContent', 'CholesterolContent', 
+        'SodiumContent', 'CarbohydrateContent', 'FiberContent', 'SugarContent', 'ProteinContent'
+    ]
+    nutrition_df = dataset[nutrition_columns].astype(float)
     
-    nutritiondf=dataset.iloc[:,7:16]
-    standarddf=nutritiondf
+    # 1. Manually scale the data using our custom function
+    scaled_nutrition_df, scaled_input_vector = manual_standard_scaler(nutrition_df, nutrition_input)
 
-    c=0
-    for i in nutritiondf.columns:
-        mew=nutritiondf[i].mean()
-        sigma=nutritiondf[i].std()
-        
-        for j in range(len(i)):
-            standarddf[i].iloc[j]=(standarddf[i].iloc[j]-mew)/sigma
-        nutritionInput[c]=(nutritionInput[c]-mew)/sigma
-        c+=1
+    # 2. Manually find the single nearest neighbor
+    best_index = manual_nearest_neighbors(
+        scaled_nutrition_df, 
+        scaled_input_vector
+    )
 
-    val=[]
-    nutritionInput=np.array(nutritionInput)
+    # Return the single best recipe as a DataFrame
+    return dataset.iloc[[best_index]]
 
-    for i in range(len(standarddf)):
-        temp=(standarddf.iloc[i].to_numpy()).T
-        num=np.dot(temp,nutritionInput)
-        temp1=standarddf.iloc[i].to_numpy()
-        norm1=np.sqrt(sum(temp1**2))
-        norm2=np.sqrt(sum(nutritionInput**2))
-        val.append(num/(norm1*norm2))
+# --- Helper function for formatting the final API output ---
 
-    print(dataset['Name'].iloc[val.index(max(val))])
-
-df=pd.read_csv("data.csv")
-contentBasedRecommend(df,[110,2.6,2.1,3,250,25,3.6,30,35],1)
+def output_recommended_recipes(dataframe):
+    """
+    Formats the recommended recipes dataframe into a list of dictionaries for the API response.
+    """
+    if dataframe is None or dataframe.empty:
+        return None
+    
+    output_df = dataframe.copy()
+    
+    # Use the safe parsing function to handle potentially messy data before outputting
+    for col in ['RecipeIngredientParts', 'RecipeInstructions']:
+        output_df[col] = output_df[col].apply(_safe_literal_eval)
+    
+    return output_df.to_dict(orient='records')
